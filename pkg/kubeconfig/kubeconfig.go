@@ -172,13 +172,51 @@ func GetHostingClusterContext(kconf *clientcmdapi.Config) (string, error) {
 		return "", fmt.Errorf("error unmarshaling config map %s", err)
 	}
 	if kflexConfig.Extensions.HostingClusterContextName == "" {
+		// Try legacy locations for older kubeconfigs that used the key
+		// 'kflex-initial-ctx-name' in preferences/extensions or context extensions.
+		if legacy := getLegacyInitialContextName(kconf); legacy != "" {
+			if isContextUsable(kconf, legacy) {
+				return legacy, nil
+			}
+		}
 		return "", fmt.Errorf("hosting cluster context data not set")
 	}
-	// make sure that context set in extension is a valid context
-	if _, ok := kconf.Contexts[kflexConfig.Extensions.HostingClusterContextName]; !ok {
-		return "", fmt.Errorf("hosting cluster context data is set to a non-existing context")
+	// make sure that context set in extension is a valid and usable context
+	if !isContextUsable(kconf, kflexConfig.Extensions.HostingClusterContextName) {
+		return "", fmt.Errorf("hosting cluster context data is set to a non-existing or unusable context")
 	}
 	return kflexConfig.Extensions.HostingClusterContextName, nil
+}
+
+// getLegacyInitialContextName scans top-level and context-level extensions for the
+// older key 'kflex-initial-ctx-name' used by legacy kubeconfigs. It returns the
+// first non-empty value found, or empty string if none found.
+func getLegacyInitialContextName(kconf *clientcmdapi.Config) string {
+	// Look in top-level extensions first
+	if kconf == nil {
+		return ""
+	}
+	// kconf.Extensions is map[string]runtime.Object
+	for _, obj := range kconf.Extensions {
+		runtimeExt := &RuntimeKubeflexExtension{}
+		if err := ConvertRuntimeObjectToRuntimeExtension(obj, runtimeExt); err == nil {
+			if v, ok := runtimeExt.Data["kflex-initial-ctx-name"]; ok && v != "" {
+				return v
+			}
+		}
+	}
+	// Check context-local extensions
+	for _, ctx := range kconf.Contexts {
+		for _, obj := range ctx.Extensions {
+			runtimeExt := &RuntimeKubeflexExtension{}
+			if err := ConvertRuntimeObjectToRuntimeExtension(obj, runtimeExt); err == nil {
+				if v, ok := runtimeExt.Data["kflex-initial-ctx-name"]; ok && v != "" {
+					return v
+				}
+			}
+		}
+	}
+	return ""
 }
 
 // Check if hosting cluster context value is set within kubeconfig
@@ -187,7 +225,34 @@ func IsHostingClusterContextSet(kconf *clientcmdapi.Config) bool {
 	if err != nil {
 		return false
 	}
-	return kflexConfig.Extensions.HostingClusterContextName != ""
+	// ensure not only that the extension is set, but that the referenced context is usable
+	if kflexConfig.Extensions.HostingClusterContextName == "" {
+		return false
+	}
+	return isContextUsable(kconf, kflexConfig.Extensions.HostingClusterContextName)
+}
+
+// isContextUsable returns true if the context exists in the kubeconfig and references
+// a cluster entry that has a non-empty server. This is a lightweight validation that
+// avoids performing network calls while catching common invalid extension states.
+func isContextUsable(kconf *clientcmdapi.Config, ctxName string) bool {
+	if kconf == nil || ctxName == "" {
+		return false
+	}
+	ctx, ok := kconf.Contexts[ctxName]
+	if !ok {
+		return false
+	}
+	// ensure referenced cluster exists
+	cluster, ok := kconf.Clusters[ctx.Cluster]
+	if !ok {
+		return false
+	}
+	// cluster must have a server defined
+	if cluster.Server == "" {
+		return false
+	}
+	return true
 }
 
 // List all contexts
@@ -305,9 +370,16 @@ func SwitchContext(kconf *clientcmdapi.Config, cpName string) error {
 
 // Switch to hosting cluster context
 func SwitchToHostingClusterContext(kconf *clientcmdapi.Config) error {
+	// If hosting cluster context is not set or not usable, behave as if no saved
+	// hosting context exists (no-op). This avoids failing callers when the
+	// stored extension points to an invalid or unusable context.
+	if !IsHostingClusterContextSet(kconf) {
+		return nil
+	}
 	hostingClusterContextName, err := GetHostingClusterContext(kconf)
 	if err != nil {
-		return fmt.Errorf("error while switching context to hosting cluster: %v", err)
+		// defensive: if the getter fails despite IsHostingClusterContextSet, treat as no-op
+		return nil
 	}
 	kconf.CurrentContext = hostingClusterContextName
 	return nil
