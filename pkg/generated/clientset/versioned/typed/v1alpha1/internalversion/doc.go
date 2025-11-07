@@ -1,3 +1,8 @@
+//go:build ignore
+// +build ignore
+
+// Deprecated: this package path was incorrect; use
+// github.com/kubestellar/kubeflex/pkg/generated/clientset/versioned/typed/tenancy/v1alpha1 instead.
 /*
 Copyright 2023 The KubeStellar Authors.
 

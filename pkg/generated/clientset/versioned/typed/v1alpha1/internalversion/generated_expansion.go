@@ -1,3 +1,7 @@
+//go:build ignore
+// +build ignore
+
+// Deprecated: use typed/tenancy/v1alpha1.
 /*
 Copyright 2023 The KubeStellar Authors.
 
